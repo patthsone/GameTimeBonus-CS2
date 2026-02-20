@@ -1,0 +1,25 @@
+# Git
+gitignore
+
+# .NET
+bin/
+obj/
+compile/
+
+# Dependencies
+CounterStrikeSharp.API.dll
+nuget.config
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+.idea/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
