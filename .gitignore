@@ -9,6 +9,7 @@ compile/
 # Dependencies
 CounterStrikeSharp.API.dll
 nuget.config
+compile.bat
 
 # IDE
 .vs/
