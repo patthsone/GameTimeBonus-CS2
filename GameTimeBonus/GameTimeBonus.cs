@@ -31,12 +31,24 @@ public class SettingsConfig
     public int BonusIntervalSeconds { get; set; } = 600;
     public int BonusAmount { get; set; } = 1;
     public bool EnableLogging { get; set; } = true;
+    public string Language { get; set; } = "ru";
+    public int ReturnWindowSeconds { get; set; } = 120;
+}
+
+public class PlayerTimeData
+{
+    public string SteamId { get; set; } = string.Empty;
+    public int AccumulatedSeconds { get; set; } = 0;
+    public bool IsActive { get; set; } = false;
+    public DateTime? DisconnectTime { get; set; }
+    public DateTime LastBonusTime { get; set; }
+    public DateTime JoinTime { get; set; }
 }
 
 public partial class GameTimeBonus : BasePlugin
 {
     public override string ModuleName => "GameTimeBonus";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleAuthor => "PattHs";
     
     private PluginConfig? _config;
@@ -44,8 +56,7 @@ public partial class GameTimeBonus : BasePlugin
     private DateTime _lastBonusTime;
     private string _logFilePath = string.Empty;
     
-    private Dictionary<string, DateTime> _playerJoinTime = new();
-    private Dictionary<string, DateTime> _playerLastBonusTime = new();
+    private Dictionary<string, PlayerTimeData> _playerData = new();
     
     private string _bonusMessage = "[Бонус] Вам начислено {amount} руб.";
 
@@ -73,10 +84,10 @@ public partial class GameTimeBonus : BasePlugin
         
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
+        RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
+        AddTimer(1.0f, SecondTimerCallback, TimerFlags.REPEAT);
         
-        AddTimer(10.0f, BonusTimerCallback, TimerFlags.REPEAT);
-        
-        Log($"Plugin loaded. Bonus interval: {_config.Settings.BonusIntervalSeconds} seconds, Amount: {_config.Settings.BonusAmount}");
+        Log($"Plugin loaded. Bonus interval: {_config.Settings.BonusIntervalSeconds} seconds, Amount: {_config.Settings.BonusAmount}, Return window: {_config.Settings.ReturnWindowSeconds} seconds");
     }
 
     public override void Unload(bool hotReload)
@@ -158,21 +169,17 @@ public partial class GameTimeBonus : BasePlugin
     private void LoadTranslations()
     {
         var langDirectory = Path.Combine(ModuleDirectory, "lang");
-        string[] supportedLangs = { "ru", "en", "uk" };
+        string selectedLang = _config?.Settings.Language ?? "ru";
         
-        foreach (var l in supportedLangs)
+        var langPath = Path.Combine(langDirectory, $"{selectedLang}.json");
+        if (File.Exists(langPath))
         {
-            var langPath = Path.Combine(langDirectory, $"{l}.json");
-            if (File.Exists(langPath))
+            var langJson = File.ReadAllText(langPath);
+            var langConfig = JsonSerializer.Deserialize<Dictionary<string, string>>(langJson);
+            if (langConfig != null && langConfig.TryGetValue("BonusMessage", out var message))
             {
-                var langJson = File.ReadAllText(langPath);
-                var langConfig = JsonSerializer.Deserialize<Dictionary<string, string>>(langJson);
-                if (langConfig != null && langConfig.TryGetValue("BonusMessage", out var message))
-                {
-                    _bonusMessage = message;
-                    Log($"Loaded language: {l}");
-                    break;
-                }
+                _bonusMessage = message;
+                Log($"Loaded language: {selectedLang}");
             }
         }
     }
@@ -193,6 +200,11 @@ public partial class GameTimeBonus : BasePlugin
             _dbConnection = new MySqlConnection(builder.ConnectionString);
             _dbConnection.Open();
             
+            using (var charsetCmd = new MySqlCommand("SET NAMES utf8mb3", _dbConnection))
+            {
+                charsetCmd.ExecuteNonQuery();
+            }
+            
             Log("Connected to database successfully");
         }
         catch (Exception ex)
@@ -201,43 +213,7 @@ public partial class GameTimeBonus : BasePlugin
         }
     }
 
-    private HookResult OnPlayerConnectFull(EventPlayerConnectFull eventInfo, GameEventInfo _)
-    {
-        var player = eventInfo.Userid;
-        if (player != null && player.IsValid && !player.IsBot && !player.IsHLTV)
-        {
-            var authId = player.AuthorizedSteamID;
-            if (authId != null)
-            {
-                var steamId2 = authId.SteamId2;
-                steamId2 = steamId2.Replace("STEAM_0:", "STEAM_1:");
-                _playerJoinTime[steamId2] = DateTime.Now;
-                _playerLastBonusTime[steamId2] = DateTime.Now;
-                Log($"Player {player.PlayerName} (SteamID: {steamId2}) connected at {DateTime.Now}");
-            }
-        }
-        return HookResult.Continue;
-    }
-
-    private HookResult OnPlayerDisconnect(EventPlayerDisconnect eventInfo, GameEventInfo _)
-    {
-        var player = eventInfo.Userid;
-        if (player != null)
-        {
-            var authId = player.AuthorizedSteamID;
-            if (authId != null)
-            {
-                var steamId2 = authId.SteamId2;
-                steamId2 = steamId2.Replace("STEAM_0:", "STEAM_1:");
-                _playerJoinTime.Remove(steamId2);
-                _playerLastBonusTime.Remove(steamId2);
-                Log($"Player {player.PlayerName} (SteamID: {steamId2}) disconnected");
-            }
-        }
-        return HookResult.Continue;
-    }
-
-    private string GetSteamIdString(CCSPlayerController player)
+    private string GetSteamId2(CCSPlayerController player)
     {
         if (player == null || !player.IsValid)
             return string.Empty;
@@ -247,8 +223,8 @@ public partial class GameTimeBonus : BasePlugin
             var authId = player.AuthorizedSteamID;
             if (authId != null)
             {
-                string steamId = authId.SteamId2;
-                Log($"Player {player.PlayerName} - SteamID: {steamId}");
+                string steamId = CleanSteamId(authId.SteamId2);
+                steamId = steamId.Replace("STEAM_0:", "STEAM_1:");
                 return steamId;
             }
             
@@ -256,12 +232,8 @@ public partial class GameTimeBonus : BasePlugin
             {
                 var steamId3 = player.UserId.Value;
                 long accountId = (long)((steamId3 >> 1) & 0x7FFFFFFFFFFFFFFF);
-                string steamId2 = $"STEAM_1:0:{accountId}";
-                Log($"Player {player.PlayerName} - SteamID (from UserId): {steamId2}");
-                return steamId2;
+                return CleanSteamId($"STEAM_1:0:{accountId}");
             }
-
-            Log($"Player {player.PlayerName} - No SteamID available (AuthorizedSteamID is null)");
         }
         catch (Exception ex)
         {
@@ -271,97 +243,216 @@ public partial class GameTimeBonus : BasePlugin
         return string.Empty;
     }
 
-    private void BonusTimerCallback()
+    private bool IsSpectator(CCSPlayerController player)
+    {
+        return player.Team == CsTeam.Spectator;
+    }
+
+    private HookResult OnPlayerConnectFull(EventPlayerConnectFull eventInfo, GameEventInfo _)
+    {
+        var player = eventInfo.Userid;
+        if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
+            return HookResult.Continue;
+
+        var steamId2 = GetSteamId2(player);
+        if (string.IsNullOrEmpty(steamId2))
+            return HookResult.Continue;
+
+        if (_playerData.TryGetValue(steamId2, out var existingData))
+        {
+            if (existingData.DisconnectTime.HasValue)
+            {
+                var timeSinceDisconnect = DateTime.Now - existingData.DisconnectTime.Value;
+                
+                if (timeSinceDisconnect.TotalSeconds <= _config!.Settings.ReturnWindowSeconds)
+                {
+                    existingData.IsActive = !IsSpectator(player);
+                    existingData.DisconnectTime = null;
+                    Log($"Player {player.PlayerName} ({steamId2}) returned within {_config.Settings.ReturnWindowSeconds}s. Resuming with {existingData.AccumulatedSeconds}s accumulated.");
+                }
+                else
+                {
+                    existingData.AccumulatedSeconds = 0;
+                    existingData.IsActive = !IsSpectator(player);
+                    existingData.DisconnectTime = null;
+                    existingData.JoinTime = DateTime.Now;
+                    Log($"Player {player.PlayerName} ({steamId2}) returned after {_config.Settings.ReturnWindowSeconds}s. Time reset.");
+                }
+            }
+            else
+            {
+                existingData.IsActive = !IsSpectator(player);
+                existingData.JoinTime = DateTime.Now;
+            }
+        }
+        else
+        {
+            _playerData[steamId2] = new PlayerTimeData
+            {
+                SteamId = steamId2,
+                AccumulatedSeconds = 0,
+                IsActive = !IsSpectator(player),
+                DisconnectTime = null,
+                LastBonusTime = DateTime.Now,
+                JoinTime = DateTime.Now
+            };
+            Log($"New player {player.PlayerName} ({steamId2}) connected");
+        }
+
+        return HookResult.Continue;
+    }
+
+    private HookResult OnPlayerDisconnect(EventPlayerDisconnect eventInfo, GameEventInfo _)
+    {
+        var player = eventInfo.Userid;
+        if (player == null)
+            return HookResult.Continue;
+
+        var steamId2 = GetSteamId2(player);
+        if (string.IsNullOrEmpty(steamId2))
+            return HookResult.Continue;
+
+        if (_playerData.TryGetValue(steamId2, out var playerData))
+        {
+            playerData.IsActive = false;
+            playerData.DisconnectTime = DateTime.Now;
+            Log($"Player {player.PlayerName} ({steamId2}) disconnected. Time frozen at {playerData.AccumulatedSeconds}s. Has {_config!.Settings.ReturnWindowSeconds}s to return.");
+        }
+
+        return HookResult.Continue;
+    }
+
+    private HookResult OnPlayerTeam(EventPlayerTeam eventInfo, GameEventInfo _)
+    {
+        var player = eventInfo.Userid;
+        if (player == null || !player.IsValid)
+            return HookResult.Continue;
+
+        var steamId2 = GetSteamId2(player);
+        if (string.IsNullOrEmpty(steamId2))
+            return HookResult.Continue;
+
+        if (_playerData.TryGetValue(steamId2, out var playerData))
+        {
+            var newTeam = eventInfo.Team;
+            bool wasSpectator = IsSpectator(player);
+            
+            playerData.IsActive = !wasSpectator;
+            
+            if (wasSpectator)
+            {
+                Log($"Player {player.PlayerName} ({steamId2}) is now Spectator. Time accumulation paused.");
+            }
+            else
+            {
+                Log($"Player {player.PlayerName} ({steamId2}) joined team {newTeam}. Time accumulation resumed.");
+            }
+        }
+
+        return HookResult.Continue;
+    }
+
+    private void SecondTimerCallback()
     {
         try
         {
+            var now = DateTime.Now;
             var players = Utilities.GetPlayers();
             
-            if (players.Count == 0)
+            foreach (var player in players)
             {
-                return;
-            }
+                if (player == null || !player.IsValid)
+                    continue;
+                
+                if (player.IsBot || player.IsHLTV)
+                    continue;
 
-            GiveBonusToAllPlayers(players);
+                var steamId2 = GetSteamId2(player);
+                if (string.IsNullOrEmpty(steamId2))
+                    continue;
+
+                if (!_playerData.TryGetValue(steamId2, out var playerData))
+                    continue;
+
+                if (!playerData.IsActive)
+                    continue;
+
+                if (IsSpectator(player))
+                {
+                    playerData.IsActive = false;
+                    continue;
+                }
+
+                playerData.AccumulatedSeconds++;
+
+                if (playerData.AccumulatedSeconds >= _config!.Settings.BonusIntervalSeconds)
+                {
+                    GiveBonusToPlayer(player, steamId2, playerData);
+                    
+                    playerData.AccumulatedSeconds = 0;
+                }
+            }
         }
         catch (Exception ex)
         {
-            Log($"Timer error: {ex.Message}");
+            Log($"Second timer error: {ex.Message}");
         }
     }
 
-    private void GiveBonusToAllPlayers(List<CCSPlayerController> players)
+    private void GiveBonusToPlayer(CCSPlayerController player, string steamId2, PlayerTimeData playerData)
     {
-        if (_dbConnection == null || _config == null) return;
+        if (_dbConnection == null || _config == null)
+            return;
 
-        int playersBonusCount = 0;
-
-        var now = DateTime.Now;
-        var minPlayTime = TimeSpan.FromSeconds(_config.Settings.BonusIntervalSeconds);
-
-        foreach (var player in players)
+        try
         {
-            if (player == null || !player.IsValid)
-                continue;
-            
-            if (player.IsBot || player.IsHLTV)
-                continue;
-
-            var authId = player.AuthorizedSteamID;
-            if (authId == null)
-                continue;
-
-            var steamId2 = authId.SteamId2;
-            
-            steamId2 = steamId2.Replace("STEAM_0:", "STEAM_1:");
-            
-            if (!_playerJoinTime.TryGetValue(steamId2, out var joinTime))
-                continue;
-
-            var playTime = now - joinTime;
-            
-            if (playTime < minPlayTime)
-                continue;
-
-            if (!_playerLastBonusTime.TryGetValue(steamId2, out var lastBonusTime))
+            var checkSql = "SELECT id FROM lk WHERE auth = @auth";
+            using (var checkCmd = new MySqlCommand(checkSql, _dbConnection))
             {
-                _playerLastBonusTime[steamId2] = now;
-                lastBonusTime = now;
-            }
-
-            var timeSinceLastBonus = (now - lastBonusTime).TotalSeconds;
-            if (timeSinceLastBonus < _config.Settings.BonusIntervalSeconds)
-                continue;
-
-            try
-            {
-                var updateSql = "UPDATE lk SET cash = cash + @amount WHERE auth = @auth";
+                checkCmd.Parameters.AddWithValue("@auth", steamId2);
+                var exists = checkCmd.ExecuteScalar();
                 
-                using var cmd = new MySqlCommand(updateSql, _dbConnection);
-                cmd.Parameters.AddWithValue("@amount", _config.Settings.BonusAmount);
-                cmd.Parameters.AddWithValue("@auth", steamId2);
-                
-                var affected = cmd.ExecuteNonQuery();
-                
-                if (affected > 0)
+                if (exists == null)
                 {
-                    playersBonusCount++;
-                    
-                    _playerLastBonusTime[steamId2] = now;
-                    
-                    var message = _bonusMessage.Replace("{amount}", _config.Settings.BonusAmount.ToString());
-                    player.PrintToChat(message);
+                    Log($"Player {player.PlayerName} ({steamId2}) not found in LK database. Skipping bonus.");
+                    return;
                 }
             }
-            catch (Exception ex)
+
+            var updateSql = "UPDATE lk SET cash = cash + @amount WHERE auth = @auth";
+            using var cmd = new MySqlCommand(updateSql, _dbConnection);
+            cmd.Parameters.AddWithValue("@amount", _config.Settings.BonusAmount);
+            cmd.Parameters.AddWithValue("@auth", steamId2);
+            
+            var affected = cmd.ExecuteNonQuery();
+            
+            if (affected > 0)
             {
-                Log($"Error giving bonus to {steamId2}: {ex.Message}");
+                playerData.LastBonusTime = DateTime.Now;
+                
+                Log($"Bonus given to {player.PlayerName} ({steamId2}). Total accumulated time reset.");
+                
+                var message = _bonusMessage.Replace("{amount}", _config.Settings.BonusAmount.ToString());
+                player.PrintToChat(message);
             }
         }
-
-        if (playersBonusCount > 0)
+        catch (Exception ex)
         {
-            Log($"Bonus given to {playersBonusCount} players");
+            Log($"Error giving bonus to {player.PlayerName} ({steamId2}): {ex.Message}");
         }
+    }
+
+    private string CleanSteamId(string steamId)
+    {
+        if (string.IsNullOrEmpty(steamId))
+            return string.Empty;
+        
+        var cleaned = new System.Text.StringBuilder();
+        foreach (char c in steamId)
+        {
+            if (c > 31 && c != 127)
+                cleaned.Append(c);
+        }
+        return cleaned.ToString();
     }
 }
