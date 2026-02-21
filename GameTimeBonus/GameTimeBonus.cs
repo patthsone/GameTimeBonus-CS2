@@ -406,7 +406,7 @@ public partial class GameTimeBonus : BasePlugin
 
         try
         {
-            var checkSql = "SELECT id FROM lk WHERE auth = @auth";
+            var checkSql = "SELECT 1 FROM lk WHERE auth = @auth";
             using (var checkCmd = new MySqlCommand(checkSql, _dbConnection))
             {
                 checkCmd.Parameters.AddWithValue("@auth", steamId2);
