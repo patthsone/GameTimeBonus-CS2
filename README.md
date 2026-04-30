@@ -1,4 +1,5 @@
-![GitHub all releases](https://img.shields.io/github/downloads/patthsone/GameTimeBonus-CS2/total?style=for-the-badge)
+![Total Downloads](https://img.shields.io/github/downloads/patthsone/GameTimeBonus-CS2/total?style=flat&label=Total%20Downloads&labelColor=rgba(0%2C%2070%2C%20114%2C%201)&color=rgba(255%2C%20255%2C%20255%2C%201)) 
+![Latest Release](https://img.shields.io/github/v/release/patthsone/GameTimeBonus-CS2?style=flat&label=Latest%20Release&labelColor=rgba(0%2C%2070%2C%20114%2C%201)&color=rgba(255%2C%20255%2C%20255%2C%201)) 
 # GameTimeBonus
 
 Плагин для Counter-Strike 2 (CS2) на базе CounterStrikeSharp, который начисляет бонусные деньги игрокам за проведённое время на сервере.
